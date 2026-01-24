@@ -32,8 +32,7 @@ ADD_FLIGHT = "➕ Додати виліт у цей звіт"
 NEXT_REPORT = "📄 Почати новий звіт"
 OTHER_TARGET = "🎯 Інша ціль"
 
-# --- ПОВНІ СПИСКИ (БЕЗ ЖОДНИХ СКОРОЧЕНЬ) ---
-
+# --- ПОВНІ СПИСКИ ---
 UNITS = [
     'Відділ прикордонної служби (тип С) РУБпАК «Стінгер»',
     'Відділ прикордонної служби (тип С) РУБпАК «Примари»',
@@ -41,11 +40,7 @@ UNITS = [
     'Відділ прикордонної служби (тип С) РУБпАК «Рекс»',
 ]
 
-STRIKE_GROUPS = [
-    'ударною групою FPV дронів',
-    'ВГ 4 сабатр 2 садна 406 ОАБР 2С22 "Богдана"',
-    'ВГ 3/3/66 ОГАДН "М777"'
-]
+GROUP_TYPES = ['ударною групою FPV дронів']
 
 PILOTS_BY_UNIT = {
     'Відділ прикордонної служби (тип С) РУБпАК «Стінгер»': [
@@ -116,7 +111,20 @@ SPOTTERS = [
 
 FREQ_CONTROL = ["380 МГц", "433 МГц", "868 МГц", "900 МГц", "915 МГц", "1.3 ГГц", "2.4 ГГц", "2.6 ГГц"]
 FREQ_VIDEO = ["1.2 ГГц", "1.3 ГГц", "2.1 ГГц", "2.4 ГГц", "3.3 ГГц", "4.9 ГГц", "5.8 ГГц", "6.08 ГГц"]
-LOSS_REASONS = ["Ціль уражено", "Втрачено через дію РЕБ", "Втрачено через технічні причини", "Без втрат", "Інше"]
+
+LOSS_REASONS = [
+    "Ціль уражено", 
+    "Ціль знищено", 
+    "Ціль пошкоджено",
+    "Втрачено через дію засобів РЕБ", 
+    "втрачено через технічні причини, а саме брак відеопередавача",
+    "втрачено через технічні причини, а саме брак плати керування",
+    "втрачено через технічні причини, а саме нестача АКБ",
+    "Втрачено через технічні причини", 
+    "Збито зі стрілецької зброї",
+    "Без втрат", 
+    "Інше"
+]
 
 # =====================
 # ДОПОМІЖНІ ФУНКЦІЇ
@@ -135,7 +143,8 @@ def validate_mgrs(text: str) -> bool:
     return bool(re.match(r'^\d{2}[A-Z]\s?[A-Z]{2}\s?\d{5}\s?\d{5}$', text.strip().upper()))
 
 def is_lost(reason: str) -> bool:
-    return any(x in (reason or "").lower() for x in ["втрачено", "реб", "техн"])
+    r = (reason or "").lower()
+    return any(x in r for x in ["втрачено", "реб", "техніч", "техн", "збито"])
 
 # =====================
 # СТАНИ
@@ -169,14 +178,14 @@ async def ask_unit(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_unit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.text == CANCEL: return await cancel_h(update, context)
     context.user_data['unit'] = update.message.text
-    await update.message.reply_text("Дата звіту:", reply_markup=get_kb([TODAY], 1, [MANUAL]))
+    await update.message.reply_text("Дата:", reply_markup=get_kb([TODAY], 1, [MANUAL]))
     return DATE
 
 async def handle_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
     val = update.message.text
     if val == BACK: return await ask_unit(update, context)
     context.user_data['date'] = datetime.now().strftime("%d.%m.%Y") if val == TODAY else val
-    await update.message.reply_text("Тип групи:", reply_markup=get_kb(STRIKE_GROUPS, 1, [MANUAL]))
+    await update.message.reply_text("Тип групи:", reply_markup=get_kb(GROUP_TYPES, 1, [MANUAL]))
     return GROUP
 
 async def handle_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -190,7 +199,7 @@ async def ask_pilots_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     available = PILOTS_BY_UNIT.get(unit, [])
     selected = context.user_data.setdefault('selected_pilots', [])
     buttons = [f"✅ {p}" if p in selected else p for p in available]
-    await update.message.reply_text(f"Склад: {', '.join(selected) if selected else 'порожньо'}\nОберіть пілотів:", 
+    await update.message.reply_text(f"Склад: {', '.join(selected) if selected else 'не обрано'}\nОберіть пілотів:", 
                                    reply_markup=get_kb(buttons, 2, [MANUAL, DONE]))
     return PILOTS
 
@@ -201,7 +210,6 @@ async def handle_pilots(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not context.user_data['selected_pilots']: return PILOTS
         await update.message.reply_text("Був підсвіт?", reply_markup=get_kb(["Так", "Ні"]))
         return SPOTTER_Q
-    
     name = val.replace("✅ ", "")
     selected = context.user_data['selected_pilots']
     if name in selected: selected.remove(name)
@@ -215,45 +223,36 @@ async def handle_spotter_q(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Хто підсвічував?", reply_markup=get_kb(SPOTTERS, 1, [MANUAL]))
         return SPOTTER_NAME
     context.user_data['spotter'] = ""
-    return await ask_location(update, context)
+    return await start_flight_decision(update, context)
 
 async def handle_spotter_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     val = update.message.text
     if val == BACK: return await handle_spotter_q(update, context)
     context.user_data['spotter'] = val
-    return await ask_location(update, context)
+    return await start_flight_decision(update, context)
 
-# --- ЛОКАЦІЯ ---
 async def ask_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Оберіть населений пункт (н.п.):", reply_markup=get_kb(LOCATIONS, 2, [MANUAL]))
+    await update.message.reply_text("Оберіть н.п. для цієї цілі:", reply_markup=get_kb(LOCATIONS, 2, [MANUAL]))
     return LOCATION
 
 async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
     val = update.message.text
-    if val == BACK: return await handle_spotter_q(update, context)
-    # Зберігаємо локацію для поточної спроби
-    context.user_data['current_temp_loc'] = val
+    if val == BACK: return await start_flight_decision(update, context)
+    context.user_data['current_temp_loc'] = val 
     return await start_flight_manual(update, context)
 
-# --- ВИБІР ЦІЛІ ТА ВИЛЬОТУ ---
 async def start_flight_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
     flights = context.user_data.get('flights', [])
     if not flights:
         return await ask_location(update, context)
-    
     mgrs_list = list(dict.fromkeys(f['mgrs'] for f in flights))
-    await update.message.reply_text(f"Виліт №{len(flights)+1}: Оберіть минулу ціль за координатами або нову:", 
+    await update.message.reply_text(f"Виліт №{len(flights)+1}: Оберіть координати або нову ціль:", 
                                    reply_markup=get_kb(mgrs_list, 1, [OTHER_TARGET]))
     return F_START
 
 async def handle_f_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     val = update.message.text
-    
-    # 1. Якщо обрано "Інша ціль" — ПЕРЕХОДИМО ДО ВИБОРУ НП
-    if val == OTHER_TARGET:
-        return await ask_location(update, context)
-
-    # 2. Якщо обрано існуючі координати
+    if val == OTHER_TARGET: return await ask_location(update, context)
     if validate_mgrs(val):
         prev = next((f for f in context.user_data['flights'] if f['mgrs'] == val), None)
         if prev:
@@ -261,94 +260,60 @@ async def handle_f_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 'target': prev['target'], 'dist_l': prev['dist_l'], 'dist_s': prev['dist_s'], 
                 'mgrs': val, 'loc': prev['loc'], 'is_template': True
             }
-            await update.message.reply_text(f"Ціль {prev['target']} ({val}) вибрана. Вкажіть точний час:")
+            await update.message.reply_text(f"Ціль {prev['target']} вибрана. Вкажіть час:")
             return F_TIME
-            
     return await ask_location(update, context)
 
 async def start_flight_manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['cur_f'] = {
-        'is_template': False,
-        'loc': context.user_data.get('current_temp_loc')
-    }
-    await update.message.reply_text("Точний час вильоту (напр. 12:40-12:55):", reply_markup=get_kb([], 1))
+    context.user_data['cur_f'] = {'is_template': False, 'loc': context.user_data.get('current_temp_loc')}
+    await update.message.reply_text("Точний час вильоту:", reply_markup=get_kb([], 1))
     return F_TIME
 
 async def h_f_time(u,c):
-    val = u.message.text
-    if val == BACK: return await start_flight_decision(u, c)
-    c.user_data['cur_f']['time'] = val
+    c.user_data['cur_f']['time'] = u.message.text
     if c.user_data['cur_f'].get('is_template'):
-        await u.message.reply_text("Оберіть дрон:", reply_markup=get_kb(DRONES, 2, [MANUAL]))
+        await u.message.reply_text("Дрон:", reply_markup=get_kb(DRONES, 2, [MANUAL]))
         return F_DRONE
     await u.message.reply_text("Тип цілі:", reply_markup=get_kb(TARGET_TYPES, 2, [MANUAL]))
     return F_TARGET
 
 async def h_f_target(u,c):
-    val = u.message.text
-    if val == BACK: return await handle_f_start(u,c)
-    c.user_data['cur_f']['target'] = val
-    await u.message.reply_text("Відстань від місця зльоту до цілі (км):", reply_markup=get_kb([], 1))
+    c.user_data['cur_f']['target'] = u.message.text
+    await u.message.reply_text("Відстань від зльоту (км):", reply_markup=ReplyKeyboardRemove())
     return F_DIST_L
-
 async def h_f_dist_l(u,c):
-    val = u.message.text
-    if val == BACK: return await h_f_time(u,c)
-    c.user_data['cur_f']['dist_l'] = val
-    await u.message.reply_text("Відстань від берега противника до цілі (м):")
+    c.user_data['cur_f']['dist_l'] = u.message.text
+    await u.message.reply_text("Відстань від берега (м):")
     return F_DIST_S
-
 async def h_f_dist_s(u,c):
-    val = u.message.text
-    if val == BACK: return await h_f_dist_l(u,c)
-    c.user_data['cur_f']['dist_s'] = val
+    c.user_data['cur_f']['dist_s'] = u.message.text
     await u.message.reply_text("Дрон:", reply_markup=get_kb(DRONES, 2, [MANUAL]))
     return F_DRONE
-
 async def h_f_drone(u,c):
-    val = u.message.text
-    if val == BACK:
-        if c.user_data['cur_f'].get('is_template'): return await handle_f_start(u,c)
-        return await h_f_dist_s(u,c)
-    c.user_data['cur_f']['drone'] = val
+    c.user_data['cur_f']['drone'] = u.message.text
     await u.message.reply_text("Частота керування:", reply_markup=get_kb(FREQ_CONTROL, 2, [MANUAL]))
     return F_FC
-
 async def h_f_fc(u,c):
-    val = u.message.text
-    if val == BACK: return await h_f_drone(u,c)
-    c.user_data['cur_f']['fc'] = val
+    c.user_data['cur_f']['fc'] = u.message.text
     await u.message.reply_text("Частота відео:", reply_markup=get_kb(FREQ_VIDEO, 2, [MANUAL]))
     return F_FV
-
 async def h_f_fv(u,c):
-    val = u.message.text
-    if val == BACK: return await h_f_fc(u,c)
-    c.user_data['cur_f']['fv'] = val
+    c.user_data['cur_f']['fv'] = u.message.text
     await u.message.reply_text("Боєприпас:", reply_markup=get_kb(MUNITIONS, 2, [MANUAL]))
     return F_MUN
-
 async def h_f_mun(u,c):
-    val = u.message.text
-    if val == BACK: return await h_f_fv(u,c)
-    c.user_data['cur_f']['mun'] = val
+    c.user_data['cur_f']['mun'] = u.message.text
     await u.message.reply_text("Результат:", reply_markup=get_kb(LOSS_REASONS, 1, [MANUAL]))
     return F_LOSS
-
 async def h_f_loss(u,c):
-    val = u.message.text
-    if val == BACK: return await h_f_mun(u,c)
-    c.user_data['cur_f']['loss'] = val
+    c.user_data['cur_f']['loss'] = u.message.text
     if c.user_data['cur_f'].get('is_template'): return await finalize_flight(u, c)
     await u.message.reply_text("Координати MGRS:")
     return F_MGRS
 
 async def h_f_mgrs(u,c):
     val = u.message.text.upper()
-    if val == BACK: return await h_f_loss(u,c)
-    if not validate_mgrs(val):
-        await u.message.reply_text("❌ Формат невірний. Спробуйте ще раз:")
-        return F_MGRS
+    if not validate_mgrs(val): return F_MGRS
     c.user_data['cur_f']['mgrs'] = val
     return await finalize_flight(u, c)
 
@@ -357,7 +322,7 @@ async def finalize_flight(update, context):
     report = build_report(context.user_data)
     await update.message.reply_text(f"📊 **Поточний звіт:**\n\n{report}", parse_mode='Markdown')
     kb = [[ADD_FLIGHT], [NEXT_REPORT], [CANCEL]]
-    await update.message.reply_text("Наступна дія:", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
+    await update.message.reply_text("Що далі?", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
     return POST_REPORT
 
 async def handle_post_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -380,11 +345,43 @@ def build_report(d: dict) -> str:
     all_locs = list(dict.fromkeys(f['loc'] for f in flights))
     loc_str = " та ".join(all_locs)
 
-    lost_c = sum(1 for f in flights if is_lost(f['loss']))
+    lost_flights = [f for f in flights if is_lost(f['loss'])]
+    
+    hits = list(dict.fromkeys([f['target'] for f in flights if "уражено" in f['loss'].lower()]))
+    damaged = list(dict.fromkeys([f['target'] for f in flights if "пошкоджено" in f['loss'].lower()]))
+    destroyed = list(dict.fromkeys([f['target'] for f in flights if "знищено" in f['loss'].lower()]))
+    
+    loss_details = ""
+    if lost_flights:
+        reasons_counts = Counter()
+        for f in lost_flights:
+            l = f['loss'].lower()
+            if "реб" in l: reasons_counts["через дію засобів РЕБ"] += 1
+            elif "відеопередавача" in l: reasons_counts["через технічні причини, а саме брак відеопередавача"] += 1
+            elif "плати керування" in l: reasons_counts["через технічні причини, а саме брак плати керування"] += 1
+            elif "нестача акб" in l: reasons_counts["через технічні причини, а саме нестача АКБ"] += 1
+            elif "технічні" in l or "техн" in l: reasons_counts["через технічні причини"] += 1
+            elif "стрілецької" in l: reasons_counts["збито зі стрілецької зброї"] += 1
+            else: reasons_counts["з інших причин"] += 1
+        loss_details = f" ({', '.join([f'{v} од. {k}' for k, v in reasons_counts.items()])})"
+
+    any_result = hits or damaged or destroyed
+    action_word = "виконано" if any_result else "виконувалось"
+    loss_text = "без втрат" if not lost_flights else f"{len(lost_flights)} од. - втрачено{loss_details}"
+    
+    results_header = ""
+    if any_result:
+        results_header = "\nЗа результатами вильотів:"
+        parts = []
+        if hits: parts.append(f" уражено: {', '.join(hits)}")
+        if damaged: parts.append(f" пошкоджено: {', '.join(damaged)}")
+        if destroyed: parts.append(f" знищено: {', '.join(destroyed)}")
+        results_header += ",".join(parts)
+
     header = (f"*{unit}: {date} ({all_times})* {group} у складі: {pilots} "
               f"{('спільно з ' + spotter + ' ') if spotter else ''}"
-              f"виконувалось завдання з ВУ противника із застосуванням FPV-дронів "
-              f"*({len(flights)} од., {'без втрат' if lost_c == 0 else f'{lost_c} од. - втрачено'})* в межах {loc_str}.")
+              f"{action_word} завдання з ВУ противника із застосуванням FPV-дронів "
+              f"*({len(flights)} од., {loss_text})* в межах {loc_str}.{results_header}")
 
     grouped = defaultdict(list)
     for f in flights: grouped[f['mgrs']].append(f)
@@ -396,16 +393,14 @@ def build_report(d: dict) -> str:
 
         def agg(block):
             t_str = ", ".join([x['time'] for x in block])
-            dr_cnt = Counter([x['drone'] for x in block])
-            dr_str = ", ".join([f"{k} - {v}од." for k,v in dr_cnt.items()])
-            mun_cnt = Counter([x['mun'] for x in block])
-            mun_str = ", ".join([f"{k} - {v}од." for k,v in mun_cnt.items()])
+            dr_str = ", ".join([f"{k}-{v}од." for k,v in Counter([x['drone'] for x in block]).items()])
+            mun_str = ", ".join([f"{k}-{v}од." for k,v in Counter([x['mun'] for x in block]).items()])
             f = block[0]
             return (f"{f['target']} ({len(block)} вильоти, {t_str}) відстань від зльоту - {f['dist_l']} км., "
                     f"від берега - {f['dist_s']} м., "
-                    f"FPV-дрон: {dr_str}; Кер: {f['fc']}, Від: {f['fv']}, б/п - {mun_str}, {f['loc']}")
+                    f"FPV-дрон: {dr_str}; Частоти: керування-{f['fc']}, відео-{f['fv']}, б/п-{mun_str}, {f['loc']}")
 
-        if ok: ok_pts.append(f"{agg(ok)}.-ціль уражено ({mgrs}).")
+        if ok: ok_pts.append(f"{agg(ok)}.-{ok[0]['loss'].lower()} ({mgrs}).")
         if lost: lost_pts.append(f"{agg(lost)} {', '.join([f['loss'] for f in lost])} ({mgrs}).")
 
     res = [header, ""]
@@ -416,7 +411,7 @@ def build_report(d: dict) -> str:
     return "\n".join(res)
 
 async def cancel_h(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Завершено. /start для початку.", reply_markup=ReplyKeyboardRemove())
+    await update.message.reply_text("Завершено. /start", reply_markup=ReplyKeyboardRemove())
     return ConversationHandler.END
 
 def main():
